@@ -6,330 +6,302 @@
 
 ## Summary
 
-This RFC introduces the concept of tracked properties. Tracked properties are just like normal properties but are the mechanism for opting into change detection. Tracked properties are exposed by Ember as decorators.
+Tracked properties introduce a simpler, more modern, and more ergonomic
+system for tracking state changes. By taking advantage of new JavaScript
+features, tracked properties allow Ember to reduce its API surface area while
+producing code that is much more intuitive to understand for new learners who
+already know JavaScript.
 
-As an example this is what that would look like.
+A small example:
 
 ```js
-import { tracked } from '@ember/object';
+export default class Person {
+  @tracked firstName = 'Chad';
+  @tracked lastName = 'Hietala';
 
-export default class Example {
-  @tracked firstName;
-  @tracked lastName;
-
-  @tracked
-  get fullName() {
+  @tracked get fullName() {
     return `${this.firstName} ${this.lastName}`;
   }
+}
 
-  set fullName(fullName) {
-    let [ first, last ] = fullName.split(' ');
-    this.firstName = first;
-    this.lastName = last;
-  }
+let person = new Person();
+console.log(person.fullName); // "Chad Hietala"
 
-  changeFirstName(firstName) {
-    this.firstName = firstName;
-  }
+person.firstName = 'Chadwick';
+console.log(person.fullName); // "Chadwick Hietala"
+```
 
-  changeLastName(lastName) {
-    this.lastName = lastName;
+## Terminology
+
+#### Computed Property (CP)
+
+A property on an Ember object whose value is produced by evaluating a
+function, and updated whenever one of its dependencies changes.
+
+```js
+const Person = EmberObject.extend({
+  loudFirstName: computed('firstName', function() {
+    return this.firstName.toUpperCase();
+  })
+});
+
+const person = Person.create();
+person.set('firstName', 'Godfrey');
+console.log(person.loudFirstName); // 'GODFREY'
+```
+
+In this document, "computed property" _always_ refers to the feature of the
+Ember object model. The native JavaScript feature of using a function to dynamically determine the value of a property is referred to as a _getter_.
+
+#### Getter
+
+The JavaScript feature that allows a function to be evaluated to determine
+the value of a property. One way of writing a getter is to use the `get`
+syntax:
+
+```js
+class Person {
+  get loudFirstName() {
+    return this.firstName.toUpperCase();
   }
 }
+
+const person = new Person();
+person.firstName = 'Godfrey';
+console.log(person.loudFirstName); // 'GODFREY'
 ```
 
 ## Motivation
 
-Broadly speaking, most component libraries have taken one of two approaches:
+Tracked properties are designed to be simpler to learn, simpler to write, and
+simpler to maintain than today's computed properties. In addition to clearer
+code, tracked properties eliminate the most common sources of bugs and mental
+model confusion in computed properties today.
 
-1. Fine-grained property observation, like Ember.
-2. Virtual DOM diffing, like React.
+### Leverage Existing JavaScript Knowledge
 
-Systems that rely on property observation trade reduced initial render performance for improved updating speed. That's because they must install observers on every property that gets rendered into the DOM, which takes time. But if a property changes, updates to the DOM are very targeted and fast.
+Ember's computed properties provide functionality that overlaps with native
+JavaScript getters and setters. Because native getters don't provide Ember
+with the information it needs to track changes, it's not possible to use them
+reliably in templates or in other computed properties.
 
-However, web users expect pages to render near instantly. Setting up observers adds a lot of overhead, which slows down initial render. Virtual DOM-based libraries like React have become very popular, because they prioritize raw render speed by keeping change-tracking bookkeeping to a minimum.
+New learners have to "unlearn" native getters, replacing them with Ember's
+computed property system. Unfortunately, this knowledge is not portable to
+other applications that don't use Ember that developers may work on in the
+future.
 
-The tradeoff is that updates require re-evaluating the component tree to figure out how the DOM needs to be mutated. Essentially, that means doing a full render pass on a component and all of its children every time a property changes.
+Tracked properties are as thin a layer as possible on top of native
+JavaScript. Tracked properties look like a normal properties because they
+*are* normal properties.
 
-While constructing virtual DOM is fast and applying diff updates can be optimized, it's far from instantaneous, particularly as the size of your application grows. As your virtual DOM-based app grows, you will have to do more work to make sure it stays performant.
-
-Tracked properties intend to take a hybrid approach to strike a balance between simplicity in the programming model and performance.
-
-#### ------- TOM SHOULD ADD MORE HERE --------
-
-## Detailed design
-
-Below specifies the `@tracked` decorator and the behavior of data within the system.
-
-### `@tracked` Syntax
-
-`@tracked` is a [property decorator](https://www.typescriptlang.org/docs/handbook/decorators.html#property-decorators) that opts the property into mutations. It can be used on class property fields or getter accessor methods.
-
-```js
-import { tracked } from '@ember/object';
-import Component from '@ember/component';
-
-export default class Employee extends Component {
-  @tracked name = 'Fred';
-  @tracked get fullName() {
-    return `${this.name} Brooks`;
-  }
-}
-```
-
-The decorator is **not** a [decorator factory](https://www.typescriptlang.org/docs/handbook/decorators.html#decorator-factories).
+Because there is no special syntax for retrieving a tracked property,
+any JavaScript syntax that feels like it should work does work:
 
 ```js
-import { tracked } from '@ember/object';
-import Component from '@ember/component';
-
-export default class Employee extends Component {
-  @tracked name = 'Fred';
-  @tracked() age = 87; // Error
-  @tracked get fullName() {
-    return `${this.name} Brooks`;
-  }
-}
+// Dot notation
+const fullName = person.fullName;
+// Destructuring
+const { fullName } = person;
+// Bracket notation for computed property names
+const fullName = person['fullName'];
 ```
 
-Doing so will result in the following error:
-
-```
-You attempted to use "@tracked" as a factory function in the "Employee" component which is not supported. Please change "@tracked()" to "@tracked".
-```
-
-### `@tracked` Runtime Semantics
-
-Tracked properties act like normal javascript properties. This means that accessing and assigning just works without the need for `Ember.get` or `Ember.set`. While these APIs are no longer required, they are compatible and will continue to work.
-
+Similarly, syntax for changing properties works just as well:
 
 ```js
-import { tracked } from '@ember/object';
-import Component from '@ember/component';
-
-export default class Employee extends Component {
-  @tracked name = 'Fred';
-  changeName(newName) {
-    this.name = newName;
-  }
-
-  @tracked get fullName() {
-    return `${this.name} Brooks`;
-  }
-
-  set fullName(newFullName) {
-    let [first] = newFullName.split(' ');
-    this.name = first;
-  }
-  // ...
-}
+// Simple assignment
+this.firstName = "Yehuda";
+// Addition assignment (+=)
+this.lastName += "Katz";
+// Increment operator
+this.age++;
 ```
 
-Just like calling `Ember.set`, assigning a value to a tracked property will schedule a rerender. Setting the same property multiple times within the same render will result in the following error:
-
-```
-You modified Employee.name twice in a single render.
-```
-
-In the event you need to re-assign a value within the same render you must schedule the set within a runloop.
+Compare this to other component APIs which become more verbose than necessary
+when JavaScript syntax isn't available:
 
 ```js
-import Component from '@ember/component';
-import { once } from '@ember/runloop';
-
-export default class Employee extends Component {
-  @tracked placeHolderHeight = 100;
-
-  didInsertElement() {
-    once('afterRender', () => {
-      this.placeHolderHeight = this.element.clientHeight;
-    });
-  }
-}
-```
-
-Semantically a `@tracked` setter does not make sense, due to the fact that a setter is always talking about setting a new value which will typically result in the getter being recomputed. To guide developers down the correct path the following assertion will be thrown for installing a tracked property on a setter:
-
-```
-You attempted to use "@tracked" on the "keyName" setter in the "Employee" component. "@tracked" setters are not required, please remove the decorator.
-```
-
-### Computed Properties & Auto-tracking
-
-Under the hood tracked properties use the Glimmer VM's [reference](https://github.com/glimmerjs/glimmer-vm/blob/master/guides/04-references.md) and [validator](https://github.com/glimmerjs/glimmer-vm/blob/master/guides/05-validators.md) systems to perform change detection. These subsystems allow us to model similar semantics to Ember's computed properties. For instance let's look at a conical example of computed properties:
-
-
-```js
-import Component from '@ember/component';
-import { computed } from '@ember/object';
-
-export default Component.extend({
-  firstName: 'Chad',
-  lastName: 'Hietala',
-  fullName: computed('firstName', 'lastName', function() {
-    return `${this.firstName} ${this.lastName}`
-  })
-});
-```
-
-With tracked properties we are able to express the same example as such:
-
-```js
-import Component from '@ember/component';
-import { tracked } from '@ember/object';
-
-export default class extends Component {
-  @tracked firstName = 'Chad';
-  @tracked lastName = 'Hietala';
-  @tracked get fullName() {
-    return `${this.firstName} ${this.lastName}`
-  }
-}
-```
-
-There are 2 key differentiators with the tracked implementation:
-
-1. It does **not** require the enumeration of the dependent keys
-2. It uses an ES5 getter
-
-We are able to elide the dependent key enumeration here because we are able to detect that when we access `fullName` we also access `firstName` and `lastName`. Therefore we can construct a "cache key" for `fullName` that is the combination of `firstName` and `lastName`'s "cache keys". This mens if either `firstName` or `lastName` update, then `fullName` needs to be recomputed the next time it is accessed. These are the exact semantics of Ember's `computed`.
-
-#### Observability
-
-TODO!
-
-#### Arrays
-
-Historically, Ember has used the [`[]` and `@each` mircosyntaxes](https://guides.emberjs.com/release/object-model/computed-properties-and-aggregate-data/) that allowed you create computed property based on the contents of arrays. For example:
-
-```js
-import EmberObject, { computed } from '@ember/object';
-import Component from '@ember/component';
-
-export default Component.extend({
-  todos: null,
-
-  init() {
-    this.set('todos', [
-      EmberObject.create({ title: 'Buy food', isDone: true }),
-      EmberObject.create({ title: 'Eat food', isDone: false }),
-      EmberObject.create({ title: 'Catalog Tomster collection', isDone: true }),
-    ]);
-  },
-
-  incomplete: computed('todos.@each.isDone', function() {
-    let todos = this.todos;
-    return todos.filterBy('isDone', false);
-  }),
-
-  titles: computed('todos.[]', function() {
-    return this.todos.mapBy('title');
-  })
-});
-```
-
-While this did allow you to create computed properties that were aware of arrays, it effectievly meant that we had an explosion of extra book keeping that we needed to perfom. Furthermore, this microsyntax is something that is something that developers must learn and at times can get wrong leading to further runtime issues.
-
-With tracked properties we have explicitly chosen to adopt the immutable pattern for dealing with arrays. In practice what this means is:
-
-1. Save the array as an "atom" in a tracked property on the object.
-2. To change state, replace the root "atom" with a new copy of the array.
-
-This approach helps you make changes predictable: you know that an array can only be updated when that root tracked property changes. JavaScript destructuring syntax can make this quite elegant:
-
-```js
-import Component from '@ember/component';
-import { tracked } from '@ember/object';
-
-export default class extends Component {
-  @tracked todos = [
-    { title: 'Buy food', isDone: true },
-    { title: 'Eat food', isDone: false },
-    { title: 'Catalog Tomster collection', isDone: true },
-  ];
-
-  @tracked get incomplete() {
-    return this.todos.filter(todo => !todo.isDone);
-  }
-
-  @tracked get titles() {
-    return this.todos.map(todo => todo.title);
-  }
-
-  addTodo(item) {
-    this.cartItems = [...this.cartItems, item];
-  }
-}
-```
-
-In the example above, calling `addItem` replaces the entire array with the new item added as the last item in the array. Setting `cartItems` to the new array will cause both `incomplete` and `titles` to be recomputed the next time they are accessed.
-
-## Interoperability
-
-Since Ember 2.10 Ember has been utilizing references and validators to perform change tracking for values that were interacting with the templating layer. This has allowed us to ensure that it is possible to model the vast majority of Ember's change tracking semantics with the new system. What this means in practice is that all of Ember's existing APIs can be interleaved with tracked properties. For instance:
-
-```hbs
-{{! app/templates/application.hbs }}
-
-<MyParent @firstName={{this.model.firstName}} @lastName={{this.model.lastName}} as |fullName|>
-  <MyChild @fullName={{fullName}}>
-</MyParent>
-```
-
-Where `MyParent` is using computed properties like:
-
-```js
-// app/components/my-parent.js
-
-import { computed } from '@ember/object';
-import Component from '@ember/component';
-
-export default Component.extend({
-  fullName: computed('firstName', 'lastName', function() {
-    return `${this.firstName} ${this.lastName}`;
-  });
+this.setState({
+  age: this.state.age + 1
 })
 ```
 
-```hbs
-{{! app/templates/components/my-parent.hbs}}
-{{yield this.fullName}}
+```js
+this.setState({
+  lastName: this.state.lastName + "Katz";
+})
 ```
 
-And where `MyChild` is using tracked properties like:
+### Avoiding Dependency Hell
+
+Currently, Ember requires developers to manually enumerate a computed
+property's dependent keys: the list of _other_ properties that _this_
+computed property depends on. Whenever one of the listed properties changes,
+the computed property's cache is cleared and any listeners are notified that
+the computed property has changed.
+
+In this example, `'firstName'` and `'lastName'` are the dependent keys of the
+`fullName` computed property:
 
 ```js
-// app/components/my-parent.js
+import EmberObject, { computed } from '@ember/object';
 
-import { tracked } from '@ember/object';
+const Person = EmberObject.extend({
+  fullName: computed('firstName', 'lastName', function() {
+    return `${this.firstName} ${this.lastName}`;
+  })
+})
+```
+
+While this system typically works well, it comes with its share of drawbacks.
+
+First, it's annoying to have to type every property twice: once as a string
+as a dependent key, and again as a property lookup inside the function. While
+explicit APIs can often lead to clearer code, this verbosity often obfuscates
+the intent of the property. People understand intuitively that they are
+typing out dependent keys to help _Ember_, not other programmers.
+
+Second, people tell us that this syntax is not very intuitive. You have to
+read the Ember documentation at least once to understand what is happening in
+this example.
+
+It's also not clear what syntax goes inside the dependent key string. In this
+simple example it's a property name, but nested dependencies become a
+property path, like `'person.firstName'`. (Good luck writing a computed
+property that depends on a property with a period in the name.)
+
+You might form the mental model that a JavaScript expression goes inside the
+string—until you encounter the `{firstName,lastName}` expansion syntax or the
+magic `@each` syntax for array dependencies.
+
+The truth is that dependent key strings are made up of an unintuitive,
+unfamiliar microsyntax that you just have to memorize if you want to use
+Ember well.
+
+Lastly, it's easy for dependent keys to fall out of sync with the
+implementation, leading to difficult-to-detect, difficult-to-troubleshoot bugs.
+
+For example, imagine a new member on our team is assigned a bug where a
+user's middle name is not appearing in their profile. Our intrepid developer
+finds the problem, and updates `fullName` to include the middle name:
+
+```js
+import EmberObject, { computed } from '@ember/object';
+
+const Person = EmberObject.extend({
+  fullName: computed('firstName', 'lastName', function() {
+    return `${this.firstName} ${this.middleName} ${this.lastName}`;
+  })
+})
+```
+
+They test their change and it seems to work. Unfortunately, they've just
+introduced a subtle bug. If the user's `middleName` were to change,
+`fullName` wouldn't update! Maybe this will get caught in a code review,
+given how simple the computed property is, but noticing missing dependencies
+is a challenge even for experienced Ember developers when the computed
+property gets more complicated.
+
+Tracked properties have a feature called _autotrack_, where dependencies are
+automatically detected as they are used.
+
+### Reducing Memory Consumption
+
+By default, computed properties cache their values. This is great when a
+computed property has to perform expensive work to produce its value, and
+that value gets used over and over again.
+
+But checking, populating, and invalidating this cache comes with its own
+overhead. Modern JavaScript VMs can produce highly optimized code, and in
+many cases the overhead of caching is greater than the cost of simply
+recomputing the value.
+
+Worse, cached computed property values cannot be freed by the garbage
+collector until the entire object is freed. Many computed properties are
+accessed only once, but because they cache by default, they take up valuable
+space on the heap for no benefit.
+
+For example, imagine this component that checks whether the `files` property is supported in
+input elements:
+
+```js
 import Component from '@ember/component';
+import { computed } from '@ember/object';
 
-export default class extends Component {
-  @tracked get greeting() {
-    return `Hello ${this.fullName}!`;
+export default Component.extend({
+  inputElement: computed(function() {
+    return document.createElement('input');
+  }),
+
+  supportsFiles: computed('inputElement', function() {
+    return 'files' in this.inputElement;
+  }),
+
+  didInsertElement() {
+    if (this.supportsFiles) {
+      // do something
+    } else {
+      // do something else
+    }
   }
-}
+})
 ```
 
-```hbs
-{{! app/templates/components/my-parent.hbs}}
-{{this.greeting}}
-```
+This component would create and retain an `HTMLInputElement` DOM node for the
+lifetime of the component, even though all we really want to cache is the
+Boolean value of whether the browser supports the `files` attribute.
+
+Particularly on mobile devices, where RAM is limited and often slow, we
+should be more conservative about our memory consumption. Tracked properties
+switch from an opt-out caching model to opt-in, allowing developers to err on
+the side of reduced memory usage, but easily enabling caching (a.k.a.
+memoization) if a property shows up as a bottleneck during profiling.
+
+### Native Classes
+
+Tracked properties are designed from the ground up for native JavaScript (ES6) classes.
+
+### "Just JavaScript"
+
+
+## Detailed design
+
+> This is the bulk of the RFC.
+
+> Explain the design in enough detail for somebody
+familiar with the framework to understand, and for somebody familiar with the
+implementation to implement. This should get into specifics and corner-cases,
+and include examples of how the feature is used. Any new terminology should be
+defined here.
 
 ## How we teach this
 
-Tracked properties are intended to simplify the programming model by removing concepts. For instance people familiar with JavaScript do not need to learn a propritary setter method for updating data. They also don't need to learn about dependent keys and remembering to properly enumerate them. It also allows us to redirect people things like Mozilla's documentation if people are not familiar with things like accessor methods.
+> What names and terminology work best for these concepts and why? How is this
+idea best presented? As a continuation of existing Ember patterns, or as a
+wholly new one?
+
+> Would the acceptance of this proposal mean the Ember guides must be
+re-organized or altered? Does it change how Ember is taught to new users
+at any level?
+
+> How should this feature be introduced and taught to existing Ember
+users?
 
 ## Drawbacks
 
-With tracked properties we are giving up some fine grained control over observing when data has changed for array mutations. As noted in the design section, arrays would need to use a immutable pattern for having their changes reflected through out the system.
+> Why should we *not* do this? Please consider the impact on teaching Ember,
+on the integration of this feature with other existing and planned features,
+on the impact of the API churn on existing apps, etc.
 
-This solution also pushes the control of what is and is not observable by the system out to the developer. This means that developers needs to manually mark the properties that can change. While this is more typing for the developer it allows us to clearly seperate out static and dynamic data. It also means that Ember only has to do the booking keeping for the explicity annotated properties.
+> There are tradeoffs to choosing any path, please attempt to identify them here.
 
 ## Alternatives
 
-We could continue to use `computed` and just make a decorator form of it. It is possible to make `computed` infer it's dependencies just like `tracked`. The downside here is that we would then have to deprecate the array microsyntaxes from `computed` as those cases are not observable through the auto tracking functionality. This would likely create unnecessary deprecation noise and it's likely a better option to provide `tracked` that can be opted into.
+> What other designs have been considered? What is the impact of not doing this?
+
+> This section could also include prior art, that is, how other frameworks in the same domain have solved this problem.
 
 ## Unresolved questions
 
+> Optional, but suggested for first drafts. What parts of the design are still
 TBD?
