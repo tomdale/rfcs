@@ -6,13 +6,12 @@
 
 ## Summary
 
-Tracked properties introduce a simpler, more modern, and more ergonomic
-system for tracking state changes. By taking advantage of new JavaScript
+Tracked properties introduce a simpler and more ergonomic system for tracking
+state change in Ember applications. By taking advantage of new JavaScript
 features, tracked properties allow Ember to reduce its API surface area while
-producing code that is much more intuitive to understand for new learners who
-already know JavaScript.
+producing code that is both more intuitive and less error-prone.
 
-A small example:
+This simple example shows a `Person` class with three tracked properties:
 
 ```js
 export default class Person {
@@ -23,53 +22,22 @@ export default class Person {
     return `${this.firstName} ${this.lastName}`;
   }
 }
-
-let person = new Person();
-console.log(person.fullName); // "Chad Hietala"
-
-person.firstName = 'Chadwick';
-console.log(person.fullName); // "Chadwick Hietala"
 ```
 
 ## Terminology
 
-#### Computed Property (CP)
+Because of the occasional overlap in terminology when discussing similar
+features, this document uses the following language consistently:
 
-A property on an Ember object whose value is produced by evaluating a
-function, and updated whenever one of its dependencies changes.
-
-```js
-const Person = EmberObject.extend({
-  loudFirstName: computed('firstName', function() {
-    return this.firstName.toUpperCase();
-  })
-});
-
-const person = Person.create();
-person.set('firstName', 'Godfrey');
-console.log(person.loudFirstName); // 'GODFREY'
-```
-
-In this document, "computed property" _always_ refers to the feature of the
-Ember object model. The native JavaScript feature of using a function to dynamically determine the value of a property is referred to as a _getter_.
-
-#### Getter
-
-The JavaScript feature that allows a function to be evaluated to determine
-the value of a property. One way of writing a getter is to use the `get`
-syntax:
-
-```js
-class Person {
-  get loudFirstName() {
-    return this.firstName.toUpperCase();
-  }
-}
-
-const person = new Person();
-person.firstName = 'Godfrey';
-console.log(person.loudFirstName); // 'GODFREY'
-```
+* A **getter** is a JavaScript feature that executes a function to determine the value of a property.
+  The function is executed every time the property is accessed.
+* A **computed property** is a property on an Ember object whose value is
+  produced by executing a function. That value is cached until one of computed
+  property's dependencies changes.
+* A **tracked getter** is a JavaScript getter that has been 
+* A **tracked simple property** is a regular, non-getter property that has been
+  instrumented to detect when it is mutated.
+* A **tracked property** refers to any property that has been instrumented. 
 
 ## Motivation
 
@@ -117,8 +85,8 @@ this.lastName += "Katz";
 this.age++;
 ```
 
-Compare this to other component APIs which become more verbose than necessary
-when JavaScript syntax isn't available:
+This compares favorably with APIs from other libraries, which becomes more
+verbose than necessary when JavaScript syntax isn't available:
 
 ```js
 this.setState({
@@ -266,6 +234,7 @@ Tracked properties are designed from the ground up for native JavaScript (ES6) c
 
 ## Detailed design
 
+### Autotracking Stack
 > This is the bulk of the RFC.
 
 > Explain the design in enough detail for somebody
@@ -289,11 +258,148 @@ users?
 
 ## Drawbacks
 
-> Why should we *not* do this? Please consider the impact on teaching Ember,
-on the integration of this feature with other existing and planned features,
-on the impact of the API churn on existing apps, etc.
+Like any technical design, tracked properties must make tradeoffs to balance
+performance, simplicity, and usability. Tracked properties make a different
+set of tradeoffs than today's computed properties.
 
-> There are tradeoffs to choosing any path, please attempt to identify them here.
+This means tracked properties come with edge cases or "gotchas" that don't
+exist in computed properties. When evaluating the following drawbacks, please
+consider the two features in their totality, including computed property
+gotchas you have learned to work around.
+
+In particular, please try to compensate for [familiarity ][familiarity] and
+[loss aversion][loss-aversion] biases. Before you form a strong opinion,
+[give it five minutes][5-minutes].
+
+[familiarity]: https://en.wikipedia.org/wiki/Familiarity_heuristic
+[loss-aversion]: https://en.wikipedia.org/wiki/Loss_aversion
+[5-minutes]: https://signalvnoise.com/posts/3124-give-it-five-minutes
+
+### Tracked Properties & Promises
+
+Dependency autotracking requires that tracked getters access their dependencies synchronously.
+Any access that happens asynchronously will not be detected as a dependency.
+
+This is most commonly encountered when trying to return a `Promise` from a
+tracked getter. Here's an example that would "work" but would never update if
+`firstName` or `lastName` change:
+
+```js
+class Person {
+  @tracked firstName;
+  @tracked lastName;
+
+  @tracked
+  get fullNameAsync() {
+    return this.reloadUser().then(() => {
+      return `${this.firstName} ${this.lastName}`;
+    });
+  }
+
+  async reloadUser() {
+    const response = await fetch('https://example.com/user.json');
+    const { firstName, lastName } = await response.json();
+    this.firstName = firstName;
+    this.lastName = lastName;
+  }
+
+  setFirstName(firstName) {
+    // This should cause `fullNameAsync` to update, but doesn't, because
+    // firstName was not detected as a dependency.
+    this.firstName = firstName;
+  }
+}
+```
+
+One way you could address this is to ensure that any dependencies are consumed synchronously:
+
+```js
+@tracked
+get fullNameAsync() {
+  // Consume firstName and lastName so they are detected as dependencies.
+  let { _firstName, _lastName } = this;
+
+  return this.reloadUser().then(() => {
+    // Fetch firstName and lastName again now that they may have been updated
+    let { firstName, lastName } = this;
+    return `${this.firstName} ${this.lastName}`;
+  });
+}
+```
+
+However, **modeling async behavior as tracked properties is an incoherent approach
+and should be discouraged**. Tracked properties are intended to hold simple
+state, or to derive state from data that is available synchronously.
+
+But asynchrony is a fact of life in web applications, so how should we deal
+with async data fetching?
+
+**In keeping with Data Down, Actions Up, async behavior should be modeled as
+methods that set tracked properties once the behavior is complete.**
+
+Async behavior should be explicit, not a side-effect of property access.
+Today's computed properties that rely on caching to only perform async
+behavior when a dependency changes are effectively reintroducing observers
+into the programming model via a side channel.
+
+A better approach is to call a method to perform the async data fetching, then
+set one or more tracked properties once the data has loaded. We can refactor the
+above example back to a synchronous `fullName` tracked property:
+
+```js
+class Person {
+  @tracked firstName;
+  @tracked lastName;
+
+  @tracked
+  get fullName() {
+    return `${this.firstName} ${this.lastName}`;
+  }
+
+  async reloadUser() {
+    const response = await fetch('https://example.com/user.json');
+    const { firstName, lastName } = await response.json();
+    this.firstName = firstName;
+    this.lastName = lastName;
+  }
+
+  setFirstName(firstName) {
+    // This should cause `fullNameAsync` to update, but doesn't, because
+    // firstName was not detected as a dependency.
+    this.firstName = firstName;
+  }
+}
+```
+
+Now, `reloadUser()` must be called explicitly, rather than being run
+implicitly as a side-effect of consuming `fullName`.
+
+### Accidental Untracked Properties
+
+One of the design principles of tracked properties is that they are only
+required for state that _changes over time_. Because tracked properties imply
+some overhead over an untracked property (however small), we only want to pay
+that cost for properties that actually change.
+
+However, an obvious failure mode is that some property _does_ change over
+time, but the user simply forgets to annotate that property as `@tracked`.
+This will cause frustrating-to-diagnose bugs where the DOM doesn't update in
+response to property changes.
+
+Fortunately, we have several strategies for mitigating this frustration.
+
+The first strategy involves the way most tracked properties will be consumed:
+via a component template. In development mode, we can detect when an
+untracked property is used in a template and install a setter that causes an
+exception to be thrown if it is ever mutated. (This is similar to today's
+"mandatory setter" that causes an exception to be thrown if a watched
+property is set without going through `set()`.)
+
+The second strategy relies on the fact that `EmberObject.create()` already
+returns a JavaScript [`Proxy`][proxy] in development mode for objects that
+rely on `unknownProperty`.
+
+[proxy]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
 
 ## Alternatives
 
