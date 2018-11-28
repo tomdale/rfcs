@@ -29,7 +29,7 @@ export default class Person {
 Decorator support in Ember is crucial for the release of Ember Octane. Native
 classes are not usable without decorators, and they are a major part of the next
 edition. That said, decorators are still a stage 2 proposal in TC39, and merging
-support for them before stage 3 would be a significant risk.
+support for them before stage 3 represents a risk.
 
 This RFC is being made now so that we can get early discussion out of the way,
 and agree on the general parameters of the `@tracked` decorator in Ember.
@@ -51,11 +51,12 @@ features, this document uses the following language consistently:
 - A **computed property** is a property on an Ember object whose value is
   produced by executing a function. That value is cached until one of computed
   property's dependencies changes.
+- A **tracked property** refers to any property that has been instrumented with
+  `@tracked`, either a _tracked getter_ or a _tracked simple property_.
 - A **tracked getter** is a JavaScript getter that has been wrapped using the
   tracked decorator
 - A **tracked simple property** is a regular, non-getter property that has been
   wrapped using the tracked decorator.
-- A **tracked property** refers to any property that has been instrumented.
 - The **legacy programming model** refers to the traditional Ember programming
   model. It includes _legacy classes_, _computed properties_, _event listeners_,
   _observers_, _property notifications_, and _curly components_, and more
@@ -269,35 +270,22 @@ from an opt-out caching model to opt-in, allowing developers to err on the side
 of reduced memory usage, but easily enabling caching (a.k.a. memoization) if a
 property shows up as a bottleneck during profiling.
 
-### Native Classes
-
-Tracked properties are designed from the ground up for native JavaScript (ES6)
-classes. Adopting them will make it easier to convert away from the aging Ember
-object model, and bring us closer to the rest of the Javascript ecosystem. As
-part of the Octane edition, tracked properties are one of the major new features
-which will enable users to stop writing Ember specific code and start writing
-plain old Javascript.
-
 ## Detailed Design
 
-This RFC proposes three new exports:
+This RFC proposes two new exports:
 
 1. The `tracked` decorator function, used to mark properties and getters as
    tracked
-2. The `trackedNotifier` function, used to mark objects that will notify the
-   tracked system manually.
-3. The `notifyObjectChange` function, used to manually notify the tracked system
-   that a tracked object has changed.
+2. The `notifyPropertyChange` function, which is currently available on the
+   Ember global, but hasn't been made available from module exports.
 
 ```ts
 const tracked: PropertyDecorator;
 
-function trackedNotifier(obj: object): object;
-
-function notifyObjectChange(obj: object): void;
+function notifyPropertyChange(obj: any, property: string): void;
 ```
 
-All three of these new functions will be exported from `@ember/object`.
+Both of these new functions will be exported from `@ember/object`.
 
 Revisiting our example from earlier, `@tracked` can be used on native class
 fields and getters/setters:
@@ -344,9 +332,9 @@ like `set`.
 let person = new Person();
 
 // Simple assignment
-person.firstName = 'Yehuda';
+person.firstName = 'Jen';
 // Addition assignment (+=)
-person.lastName += 'Katz';
+person.lastName += 'Weber';
 // Increment operator
 person.age++;
 ```
@@ -411,78 +399,29 @@ and setting `lastName` has invalidated `fullName`.
 > getter_. If it hasn't, then Glimmer does not rerender the related section of
 > the DOM. This is effectively an automatic `shouldComponentUpdate` from React.
 >
-> In practice, this won't cause inconsistency because untracked properties are
-> effectively immutable in development mode (see the next section). The only
-> cases where they are not are when users have opted into manual change tracking
-> with `trackedNotifier` and `notifyObjectChange`.
+> To prevent inconsistency, during development time, tracked properties will
+> keep a cache of their previous value to compare when they are activated and
+> ensure that it hasn't changed without invalidation. This will prevent improper
+> usage of tracked properties _outside_ of Glimmer's change tracking.
 
-### Untracked Properties
-
-Revisiting the `middleName` bug from earlier, you may notice that it's still
-possible for a new developer to introduce a bug with tracked properties. What if
-they don't know that all mutable properties must be tracked? This would fail,
-just like our previous example:
-
-```js
-import { tracked } from '@ember/object';
-
-class Person {
-  @tracked firstName = 'Tom';
-  @tracked lastName = 'Dale';
-  middleName = 'Tomster';
-
-  @tracked
-  get fullName() {
-    return `${this.firstName} ${this.middleName} ${this.lastName}`;
-  }
-}
-```
-
-The last piece of the puzzle here will be a development time only assertion, the **immutable property assertion**:
-
-```
-You attempted to set the `middleName` property, which was consumed by a
-tracked getter but was not marked as tracked. Values that are not
-marked as tracked are immutable by default, if you expected this value
-to change please decorate the property with the `@tracked` decorator.
-
-If you cannot use the tracked decorator because the property is part
-of a legacy Ember library, consider using Ember's `get` function.
-
-If you cannot use the tracked decorator because the property is part
-of a non-Ember library, consider using a trackedNotifier.
-
-For more details, see this guide: {{LINK-TO-GUIDE}}
-```
-
-When you access _untracked_ properties from an a tracked getter, we will install
-a setter similar to the [mandatory setter function](https://github.com/emberjs/ember.js/blob/3ea40fb7400f91559fed19bfec96a90aa0b00053/packages/@ember/-internals/metal/lib/properties.ts#L64-L77)
-that Ember adds to properties that are watched by computeds or observers. This
-will throw the above error if the user ever tries to set the property,
-effectively making it immutable, but giving the user clear feedback on how to
-solve the issue.
-
-To accomplish this, we can wrap any object which has tracked properties with a
-native [`Proxy`][proxy], which will subsequently wrap any objects or array
-properties which are accessed with another proxy, and so on. These proxies will
-be able to check if any untracked properties are being accessed from an tracked
-context, and setup immutable assertions if so.
-
-### Tracked Notifiers
+### Manual Invalidation
 
 In user code, the idea that all mutable properties should be marked as tracked
-and that all untracked properties are immutable works well in isolation.
-However, it is problematic when users start working with code they cannot
-control which has not been instrumented with `@tracked` properly.
+and that all other properties are effectively immutable works well in isolation.
+However, there are cases where users will want to work with code they do _not_
+control, such as external library code.
 
-For Ember code which relies on computed properties and `set` there is an interop
-story (more on that below), but for non-Ember code from external libraries this
-presents a problem. Consider the following `Timer` and `TimerComponent` classes
+Consider the following example. We have a `simple-timer` library that we've
+imported from NPM, and we're trying to wrap it with a `TimerComponent` that
+uses it to keep track of how much time has passed:
 
 ```js
 // simple-timer/index.js
 export default class Timer {
   seconds = 0;
+  minutes = 0;
+  hours = 0;
+
   listeners = [];
 
   constructor() {
@@ -527,26 +466,18 @@ export default class TimerComponent extends Component {
 ```
 
 Even though we've marked the `timer` property as tracked, the `timer.seconds`
-property is untracked, and _it_ is the field that is updated. When we access
-this field from `currentTime`, it marks it as immutable, and when the timer's
-next `setInterval` fires it will throw an error.
-
-To prevent this from happening, users can mark objects as `trackedNotifier`s:
+property is untracked, and _it_ is the field that is updated. We can solve this
+problem by using the timer library's `onTick` event handler to re-set the field,
+invalidating it:
 
 ```js
-import Timer from 'simple-timer';
-import Component from '@ember/component';
-import { tracked, trackedNotifier, notifyObjectChange } from '@ember/object';
-
 export default class TimerComponent extends Component {
+  @tracked timer = new Timer();
+
   constructor() {
-    super(...arguments);
-
-    this.timer = trackedNotifier(new Timer());
-
     this.timer.onTick(() => {
-      // Notify that the object has changed
-      notifyObjectChange(this.timer);
+      // invalidate the timer field.
+      this.timer = this.timer;
     });
   }
 
@@ -562,15 +493,75 @@ export default class TimerComponent extends Component {
 }
 ```
 
-Tracked notifiers are objects that must manually notify that they've changed
-with `notifyObjectChange`, which can be called with the tracked notifier as its
-first parameter.
+This invalidates our properties whenever the timer updates. This is a simple
+technique which can be used in many cases with complex classes, POJOs, and
+arrays, but you may have noticed that we are invalidating `currentMinutes` more
+often than we should. This is inefficient, and could be made better by directly
+using `notifyPropertyChange`:
 
-This system does _not_ have a way to specify the granularity of the properties
-that have changed on the notifier. In the above example, both `currentSeconds`
-and `currentMinutes` would be invalidated on each tick of the timer. This system
-is intentionally minimal, leaving room for future expansion of APIs for
-instrumenting non-Ember/Glimmer libraries with change tracking.
+```js
+export default class TimerComponent extends Component {
+  timer = new Timer();
+
+  @tracked seconds;
+  @tracked minutes;
+
+  constructor() {
+    this.timer.onTick(() => {
+      // invalidate the seconds value
+      notifyPropertyChange(this, 'currentSeconds');
+
+      if (this.timer.seconds % 60 === 0) {
+        // invalidate the seconds value
+        notifyPropertyChange(this, 'currentMinutes');
+      }
+    });
+  }
+
+  @tracked
+  get currentSeconds() {
+    return this.timer.seconds;
+  }
+
+  @tracked
+  get currentMinutes() {
+    return this.timer.minutes;
+  }
+}
+```
+
+This API is intended to be used primarily by _addon and library_ developers who
+want to interoperate with non-Ember libraries, and is not very different from
+equivalent interop layer code which uses computed properties and property
+notifications:
+
+```js
+export default class TimerComponent extends Component {
+  timer = new Timer();
+
+  constructor() {
+    this.timer.onTick(() => {
+      // invalidate the seconds value
+      notifyPropertyChange(this.timer, 'seconds');
+
+      if (this.timer.seconds % 60 === 0) {
+        // invalidate the seconds value
+        notifyPropertyChange(this.timer, 'minutes');
+      }
+    });
+  }
+
+  @computed('timer.seconds')
+  get currentSeconds() {
+    return this.timer.seconds;
+  }
+
+  @computed('timer.minutes')
+  get currentMinutes() {
+    return this.timer.minutes;
+  }
+}
+```
 
 ### Interop with the Legacy Programming Model
 
@@ -758,10 +749,11 @@ Let's walk through the flow here:
    which is a computed property. The property is detected and added to the
    tracked stack.
 3. We then access the plain, undecorated `polling` object. Because it is
-   is not tracked and not a computed property, we add the immutable setter which
-   will throw an error.
+   is not tracked and not a computed property, tracked does not know that it
+   could update in the future.
 4. Sometime later, the async request returns with the configuration object. We
-   attempt to set it on the service, and trigger the immutable setter assertion.
+   set it on the service, but because our tracked getter did not know this
+   property would update, it does not invalidate.
 
 In order to prevent this from happening, user's will have to use `get` when
 accessing any values which may be set with `set`, and are not computed
@@ -825,16 +817,15 @@ this.lastName += 'Katz';
 this.age++;
 ```
 
-#### Triggering Updates on Arrays
+#### Triggering Updates on Complex Objects
 
-One case we should pay special attention to is array mutations. Arrays have
-always been special in Ember - from the KVO compliant array mutation methods
-(`pushObject`, `popObject`, etc.) to the special `@each` and `[]` syntax in
-computed property notifications. Unfortunately, they are not perfectly
-straightforward with tracked properties either.
+There may be cases where users want to update values in complex, untracked
+objects such as arrays or POJOs. `@tracked` will only be usable with class
+syntax at first, and while it may make sense to formalize these objects into
+tracked classes in some cases, this will not always be the case.
 
-With tracked properties, updating an array won't invalidate the tracker
-directly. Instead, users should set the property again to trigger the setter:
+To do this, users can re-set a tracked value directly after its inner values
+have been updated.
 
 ```js
 class SomeComponent extends Component {
@@ -851,9 +842,9 @@ class SomeComponent extends Component {
 }
 ```
 
-This may seem a bit strange at first, but requires much less extra knowledge
-about special array methods and listeners. The one step is to re-set the array,
-no matter what the change is.
+This may seem a bit strange at first, but it allows users to mentally scope
+off a tree of objects. They manipulate internals as they see fit, and the only
+operation they need to do to update state is set the nearest tracked property.
 
 ### Interop with Legacy Systems
 
@@ -1006,18 +997,20 @@ but the user simply forgets to annotate that property as `@tracked`. This will
 cause frustrating-to-diagnose bugs where the DOM doesn't update in response to
 property changes.
 
-Fortunately, we have several strategies for mitigating this frustration.
+Fortunately, we have a strategy for mitigating some of this frustration. It
+involves the way most tracked properties will be consumed: via a component
+template. In development mode, we can detect when an untracked property is used
+in a template and install a setter that causes an exception to be thrown if it
+is ever mutated. (This is similar to today's "mandatory setter" that causes an
+exception to be thrown if a watched property is set without going through
+`set()`.)
 
-The first strategy involves the way most tracked properties will be consumed:
-via a component template. In development mode, we can detect when an untracked
-property is used in a template and install a setter that causes an exception to
-be thrown if it is ever mutated. (This is similar to today's "mandatory setter"
-that causes an exception to be thrown if a watched property is set without going
-through `set()`.)
-
-The second strategy relies on the fact that `EmberObject.create()` already
-returns a JavaScript [`Proxy`][proxy] in development mode for objects that rely
-on `unknownProperty`.
+Unfortunately this strategy cannot be applied to values accessed by tracked
+getters. The only way we could detect such access would be with native
+[Proxies](proxy), but proxies are more focussed on security over flexibility
+and recent discussion shows that [they may break entirely when used with
+private fields](https://github.com/tc39/proposal-class-fields/issues/106). As
+such, it would not be ideal for us to
 
 ## Alternatives
 
