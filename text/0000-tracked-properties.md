@@ -1014,29 +1014,70 @@ such, it would not be ideal for us to
 
 ## Alternatives
 
-- We could keep the current computed property based system, and refactor it
-  internally to use references only and not rely on chains or the old property
-  notification system. This would be difficult, since CPs are very intertwined
-  with property events as are their dependencies. It would also mean we wouldn't
-  get the DX benefits of cleaner syntax, and the performance benefits of opt-in
-  change tracking.
+### Ship tracked properties in user-land
 
-- We could continue to rely on `set`. There is precedent for this in other
-  frameworks, such as React's `setState`. This would open up a lot of design
-  possibilities, but likely wouldn't be able to restrict the requirement for
-  `@tracked` being applied to all mutable properties for the same reason
-  `get` must be used in interop.
+Instead of shipping `@tracked` today, we can focus on formalizing the primitives
+which it uses under the hood in Glimmer VM (References and Validators) and make
+these publicly consumable. This way, users will be able to implement tracked in
+an addon and experiment with it before it becomes a core part of Ember.
 
-- We could allow `@tracked` to receive explicit dependencies instead of forcing
-  `get` usage for interop. This would be very complex, if even possible,
-  and is ultimately not functionality `@tracked` should have in the long run, so
-  it would not make sense to add it now.
+This approach is similar to the approach taken with component managers in the
+past year, which unblocked experimentation with `SparklesComponent`s as a way to
+validate the design of `GlimmerComponent`s, and unlocked the ability for power
+users to create their own component APIs. However, the reference and validator
+system is a much more core part of the Glimmer VM, and it could take much longer
+to figure out the best and safest way to do this without exposing too much of
+the internals. It would certainly prevent `@tracked` from shipping with Ember
+Octane.
 
-- We could attempt to wait until Ember's support matrix allows us to use native
-  [Proxies][proxy] in production. This would open up huge possibilities for
-  automatic change tracking, but would also likely have a major performance
-  impact. It's hard to say whether or not proxies will be able to match the
-  performance of manually annotated tracked properties, and this could always be
-  revisited in the future.
+### Keep the current system
+
+We could keep the current computed property based system, and refactor it
+internally to use references only and not rely on chains or the old property
+notification system. This would be difficult, since CPs are very intertwined
+with property events as are their dependencies. It would also mean we wouldn't
+get the DX benefits of cleaner syntax, and the performance benefits of opt-in
+change tracking and caching.
+
+### We could keep `set`
+
+Tracked properties were designed around wanting to use native setters to update
+state. If we remove that constraint and keep `set`, it opens up some
+possibilities. There is precedent for this in other frameworks, such as React's
+`setState`.
+
+However, keeping `set` likely wouldn't be able to restrict the requirement for
+`@tracked` being applied to all mutable properties for the same reason `get`
+must be used in interop - there's no way for a tracked property to know that a
+plain, undecorated property could update in the future.
+
+### Allow explicit dependencies
+
+We could allow `@tracked` to receive explicit dependencies instead of forcing
+`get` usage for interop. This would be very complex, if even possible, and is
+ultimately not functionality `@tracked` should have in the long run, so it would
+not make sense to add it now.
+
+### We could wait on private fields and Proxy developments
+
+Native [Proxies](proxy) represent a lot of possibilities for automatic change
+tracking. Other frameworks such as Vue and Aurelia are looking into using
+recursive proxy structures to wrap objects and intercept access, which would
+allow them to track changes without _any_ decoration. We also considered using
+recursive proxies in earlier drafts of this proposal, even though they aren't
+part of our support matrix we believed they could be used during development to
+assert when users attempted to update untracked properties which had been
+consumed from tracked getters.
+
+However, as mention above, TC39 has made it clear that this was [not an intended
+use for Proxy](https://github.com/tc39/proposal-class-fields/issues/106), and
+they will be _breaking_ this functionality with the inclusion of private fields.
+They have also expressed that [they would like to solve this
+use-case](https://github.com/tc39/proposal-class-fields/issues/162#issuecomment-441101578)
+(observing object state changes in general) separately, and [a strawman proposal
+was made](https://github.com/littledan/proposal-proxy-transparent) (though it
+has not advanced and does not seem like it will). We could wait to see what the
+future looks like here, and see if we can provide a more ergonomic tracked
+properties RFC in the future.
 
 [proxy]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
