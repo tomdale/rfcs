@@ -646,7 +646,7 @@ class SomeComponent extends Component {
 }
 ```
 ```hbs
-{{pollInterval}}
+{{this.pollInterval}}
 ```
 
 Let's walk through the flow here:
